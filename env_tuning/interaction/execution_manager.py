@@ -91,7 +91,13 @@ class ExecutionManager:
                 decoded_responses=None
             )
     
-    def format_execution_response(self, execution_results: List[Any], has_error: bool) -> Tuple[str, float]:
+    def format_execution_response(
+        self,
+        execution_results: List[Any],
+        has_error: bool,
+        stage: int = None,
+        augmented_env: bool = False,
+    ) -> Tuple[str, float]:
         """
         格式化执行结果响应
         
@@ -104,8 +110,11 @@ class ExecutionManager:
         """
         response_content = json.dumps(execution_results, ensure_ascii=False)
         score = -2.0 if has_error else -1.0
+        stage_text = f" Current SEET stage: {stage}." if stage is not None else ""
+        env_text = " Environment mode: augmented." if augmented_env else " Environment mode: standard."
         user_hint = (
-            f"Here are the function's execution results. Execution results:{response_content}\n "
+            f"Here are the function's execution results. Execution results:{response_content}\n"
+            f"{stage_text}{env_text} "
             f"If you believe you have already fulfilled the user's request, please first outline "
             f"your thought process in a <think></think>pair, and then give a brief summary of the "
             f"result in an <answer></answer> pair. Otherwise, you should continue to call until "

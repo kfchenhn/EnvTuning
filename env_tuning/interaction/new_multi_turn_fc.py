@@ -25,6 +25,7 @@ from .execution_manager import ExecutionManager
 from .score_calculator import ScoreCalculator
 from .turn_manager import TurnManager
 from bfcl_env.multi_turn_utils import execute_multi_turn_func_call
+from env_tuning.seet import SeetConfig, SeetRuntime
 
 
 class MultiTurnFunctionCallInteraction(BaseInteraction):
@@ -35,7 +36,9 @@ class MultiTurnFunctionCallInteraction(BaseInteraction):
         self.name = config.get("name", "multi_turn_function_call")
         self._instance_dict: Dict[str, InstanceState] = {}
         self.max_step_limit = 5
-        
+        self.seet_config = SeetConfig(**config.get("seet", {}))
+        self.seet_runtime = SeetRuntime(self.seet_config) if self.seet_config.enabled else None
+
         # 初始化模块化处理器
         self.response_handler = ResponseHandler()
         self.execution_manager = ExecutionManager()
@@ -126,7 +129,18 @@ class MultiTurnFunctionCallInteraction(BaseInteraction):
                 score = 0.0
             
             return should_term, content, score, extra
-        
+
+        if self.seet_runtime and self.seet_runtime.should_retry(state.current_turn_attempt_counts):
+            retry = self.seet_runtime.build_retry_hint(
+                stage=self.seet_config.stage,
+                entry_id=entry_id,
+                turn_index=state.current_turn_index,
+                fail_calls=[],
+                induced_calls=self.turn_manager._get_ground_truth_calls(state, state.current_turn_index) if self.seet_config.allow_induced_anchor else None,
+            )
+            if retry.should_retry:
+                return False, retry.hint_text, -1.0, {"seet_fast_loop": True}
+
         return False, response_data.error_message or "Parse error", -3.0, {}
     
     def _handle_special_cases(self, response_data: ResponseData, state: InstanceState, entry_id: str) -> Optional[Tuple[bool, str, float, Dict[str, Any]]]:
@@ -165,10 +179,34 @@ class MultiTurnFunctionCallInteraction(BaseInteraction):
         
         # 准备继续执行的响应
         user_hint, score = self.execution_manager.format_execution_response(
-            execution_result.execution_results, 
-            execution_result.has_error
+            execution_result.execution_results,
+            execution_result.has_error,
+            stage=self.seet_config.stage if self.seet_config.enabled else None,
+            augmented_env=self.seet_config.use_augmented_env if self.seet_config.enabled else False,
         )
-        
+
+        if self.seet_runtime and not execution_result.has_error:
+            self.seet_runtime.on_success(
+                entry_id=entry_id,
+                turn_index=state.current_turn_index,
+                decoded_calls=execution_result.decoded_responses or [],
+                anchor_type="standard" if self.seet_config.stage >= 3 else "induced",
+            )
+
+        if self.seet_runtime and execution_result.has_error and self.seet_runtime.should_retry(state.current_turn_attempt_counts):
+            fail_calls = execution_result.decoded_responses or []
+            induced_calls = self.turn_manager._get_ground_truth_calls(state, state.current_turn_index) if self.seet_config.allow_induced_anchor else None
+            retry = self.seet_runtime.build_retry_hint(
+                stage=self.seet_config.stage,
+                entry_id=entry_id,
+                turn_index=state.current_turn_index,
+                fail_calls=fail_calls,
+                induced_calls=induced_calls,
+            )
+            if retry.should_retry:
+                score = min(score, -1.0)
+                return False, user_hint + "\n\n" + retry.hint_text, score, {"seet_fast_loop": True}
+
         return False, user_hint, score, {}
 
     async def calculate_score(self) -> float:

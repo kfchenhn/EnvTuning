@@ -24,7 +24,7 @@ actor_rollout_ref:
     multi_turn:
       enable: True
       max_turns: 100
-      interaction_config_path: "env_tuning/config/multi_turn_fc_interaction_config.yaml"
+      interaction_config_path: "env_tuning/config/multi_turn_fc_interaction_stage2.yaml"
       format: qwen
     max_model_len: 32768
   actor:
