@@ -4,6 +4,8 @@ from typing import Any, Dict, List, Optional
 
 @dataclass
 class AnchorTrace:
+    """锚点轨迹（单轮）。"""
+
     entry_id: str
     turn_index: int
     decoded_calls: List[Any]
@@ -12,6 +14,8 @@ class AnchorTrace:
 
 @dataclass
 class AnchorReplayBuffer:
+    """历史成功轨迹回放池。"""
+
     traces: Dict[str, List[AnchorTrace]] = field(default_factory=dict)
 
     def push(self, trace: AnchorTrace) -> None:
@@ -19,13 +23,11 @@ class AnchorReplayBuffer:
 
     def latest(self, entry_id: str, turn_index: int) -> Optional[AnchorTrace]:
         candidates = [x for x in self.traces.get(entry_id, []) if x.turn_index == turn_index]
-        if not candidates:
-            return None
-        return candidates[-1]
+        return candidates[-1] if candidates else None
 
 
 class DynamicAnchorSelector:
-    """按 SEET 优先级选择锚点。"""
+    """按 SEET 优先级选择锚点：Peer > Historical > Induced。"""
 
     def __init__(self, replay_buffer: AnchorReplayBuffer):
         self.replay_buffer = replay_buffer
@@ -48,7 +50,7 @@ class DynamicAnchorSelector:
             if historical is not None:
                 return historical
 
-        # Priority 3: Curriculum induced anchor (Stage 2)
+        # Priority 3: Curriculum Induced Anchor (Stage 2)
         if stage == 2 and induced_anchor is not None:
             return induced_anchor
 

@@ -15,52 +15,46 @@
 # limitations under the License.
 
 import json
-from typing import List, Any, Tuple
+from typing import List, Any, Tuple, Optional
 from .data_models import InstanceState, ExecutionResult
 from .utils import (
     parse_tool_calls,
     default_decode_execute_prompting,
     is_empty_execute_response,
-    has_execution_error
+    has_execution_error,
 )
 from bfcl_env.multi_turn_utils import execute_multi_turn_func_call
 
 
 class ExecutionManager:
-    """管理函数执行相关逻辑"""
-    
-    def execute_function_calls(self, tool_content: str, state: InstanceState, instance_id: str, entry_id: str) -> ExecutionResult:
-        """
-        执行函数调用
-        
-        Args:
-            tool_content: 工具调用内容
-            state: 实例状态
-            instance_id: 实例ID
-            entry_id: 条目ID
-            
-        Returns:
-            ExecutionResult: 执行结果
-        """
+    """管理函数执行相关逻辑。"""
+
+    def execute_function_calls(
+        self,
+        tool_content: str,
+        state: InstanceState,
+        instance_id: str,
+        entry_id: str,
+        predecoded_responses: Optional[List[Any]] = None,
+    ) -> ExecutionResult:
+        """执行函数调用。"""
         try:
-            # 解码工具调用
-            model_responses = parse_tool_calls(tool_content)
-            decoded_responses = default_decode_execute_prompting(model_responses)
-            
-            # 检查是否为空响应
+            decoded_responses = predecoded_responses
+            if decoded_responses is None:
+                model_responses = parse_tool_calls(tool_content)
+                decoded_responses = default_decode_execute_prompting(model_responses)
+
             if is_empty_execute_response(decoded_responses):
                 return ExecutionResult(
                     execution_results=[],
                     new_instances=state.involved_instances,
                     has_error=False,
                     should_continue=False,
-                    decoded_responses=decoded_responses
+                    decoded_responses=decoded_responses,
                 )
-            
-            # 添加到响应列表
+
             state.single_turn_model_response_decode_list.append(decoded_responses)
-            
-            # 执行函数调用
+
             execution_results, new_instances = execute_multi_turn_func_call(
                 decoded_responses,
                 state.initial_config,
@@ -70,27 +64,26 @@ class ExecutionManager:
                 long_context=("long_context" in entry_id or "composite" in entry_id),
                 is_evaL_run=False,
             )
-            
-            # 检查执行错误
+
             has_error = has_execution_error(execution_results)
-            
+
             return ExecutionResult(
                 execution_results=execution_results,
                 new_instances=new_instances,
                 has_error=has_error,
                 should_continue=True,
-                decoded_responses=decoded_responses
+                decoded_responses=decoded_responses,
             )
-            
-        except Exception as e:
+
+        except Exception:
             return ExecutionResult(
                 execution_results=[],
                 new_instances=state.involved_instances,
                 has_error=True,
                 should_continue=False,
-                decoded_responses=None
+                decoded_responses=predecoded_responses,
             )
-    
+
     def format_execution_response(
         self,
         execution_results: List[Any],
@@ -98,20 +91,12 @@ class ExecutionManager:
         stage: int = None,
         augmented_env: bool = False,
     ) -> Tuple[str, float]:
-        """
-        格式化执行结果响应
-        
-        Args:
-            execution_results: 执行结果列表
-            has_error: 是否有错误
-            
-        Returns:
-            Tuple[str, float]: (用户提示, 评分)
-        """
+        """格式化执行结果响应。"""
         response_content = json.dumps(execution_results, ensure_ascii=False)
         score = -2.0 if has_error else -1.0
         stage_text = f" Current SEET stage: {stage}." if stage is not None else ""
         env_text = " Environment mode: augmented." if augmented_env else " Environment mode: standard."
+
         user_hint = (
             f"Here are the function's execution results. Execution results:{response_content}\n"
             f"{stage_text}{env_text} "
@@ -121,32 +106,15 @@ class ExecutionManager:
             f"fulfilling user's request."
         )
         return user_hint, score
-    
+
     def decode_tool_calls(self, tool_content: str) -> List[Any]:
-        """
-        解码工具调用
-        
-        Args:
-            tool_content: 工具调用内容
-            
-        Returns:
-            List[Any]: 解码后的响应列表
-        """
+        """仅做工具调用解码，不执行。"""
         try:
             model_responses = parse_tool_calls(tool_content)
             return default_decode_execute_prompting(model_responses)
         except Exception:
             return []
-    
+
     def check_execution_limits(self, state: InstanceState, max_limit: int) -> bool:
-        """
-        检查执行次数限制
-        
-        Args:
-            state: 实例状态
-            max_limit: 最大限制次数
-            
-        Returns:
-            bool: 是否超过限制
-        """
+        """检查执行次数是否超过限制。"""
         return state.current_turn_attempt_counts > max_limit
