@@ -92,7 +92,22 @@ SEET 的目标是破解智能体训练里的三难困境：数据稀缺、环境
 
 ---
 
-## 6. 后续可选增强（非必须）
+
+## 6. Slow Loop 端到端闭环（本次新增）
+
+本仓库当前已将 `seet_counterfactual_records` 直接接入训练奖励路径：
+
+1. `TurnManager.advance_to_next_turn()` 会把当轮反事实记录放入 `extra`：
+   `{"seet_counterfactual_records": ...}`。
+2. `sglang_rollout` 会把 interaction 侧 `metrics` 聚合到 `reward_scores["interaction_turn_metrics"]`。
+3. `env_tuning/bfcl_reward.py` 从 `interaction_turn_metrics` 提取反事实数量，
+   计算 `seet_slow_loop_bonus`，并直接加到最终 `score`。
+
+这样慢通道样本不仅被记录，而且会实际影响 PPO/GRPO 的 reward tensor，实现 end-to-end 闭环。
+
+---
+
+## 7. 后续可选增强（非必须）
 
 - 在 trainer 侧直接消费 `seet_counterfactual_records`，把慢通道纳入正式训练损失；
 - 增加 batch 级 Peer Anchor 检索器，补齐最高优先级锚点路径；
