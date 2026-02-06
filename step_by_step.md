@@ -1,218 +1,269 @@
 # EnvTuning → SEET 的逐步实现说明（Step by Step）
 
-> 目标：从“原始 EnvTuning 多轮函数调用训练”出发，按**功能闭环**一步步落地到当前 SEET（Self-Play with Environment Tuning）实现。  
-> 写法原则：每一步都回答 3 件事——**为什么做、改了哪里、如何验证**。
+> 目标：从原始 EnvTuning 多轮函数调用框架，逐步落地到可复现实验的 SEET（Self-Play with Environment Tuning）训练范式。  
+> 结构原则：每一步都给出 **目标（Why）→ 实施（What）→ 验证（How）→ 产出（Done）**，确保工程与论文描述严格对齐。
 
 ---
 
-## Step 0：建立基线（原始 EnvTuning）
+## Step 0：建立可对照基线（Freeze Baseline）
 
-### 为什么做
-在改造前先明确“已有能力”和“缺口”，否则后续改动容易堆叠但不成体系。
+### Why（目标）
+在引入 SEET 机制前，先冻结“原系统能力边界”，避免后续迭代中出现“效果提升但来源不清”的问题。
 
-### 基线能力
-- 已有多轮交互主流程（解析模型输出 → 调工具 → 回写环境反馈）。
-- 已有按轮次推进、终止、打分的基础逻辑。
-- 但缺少 SEET 所需的：
-  1. 课程化环境策略（Stage1~4）；
-  2. 快通道（在线重试）+ 慢通道（反事实样本）双通道；
-  3. FPLD 首分歧诊断；
-  4. 动态锚点复用机制；
-  5. 反事实样本进入训练目标的闭环通路。
+### What（实施）
+- 明确当前流程：`parse → decode → execute → feedback → turn advance`。
+- 识别与 SEET 的能力差距：
+  1. 无课程学习（Stage1~4）控制面；
+  2. 无 Fast/Slow 双通道；
+  3. 无 FPLD 首分歧定位；
+  4. 无动态锚点回放；
+  5. 无反事实样本到训练目标的闭环。
 
-### 验证
-- 保留基线流程可运行，后续每步在此之上增量演进。
+### How（验证）
+- 基线任务可以跑通；
+- 错误场景只有惩罚，没有结构化纠偏。
+
+### Done（产出）
+- 得到 SEET 改造的“最小可验证起点”。
 
 ---
 
-## Step 1：抽象 SEET 配置与阶段控制（先立“控制面”）
+## Step 1：先搭控制面——SEET 配置与阶段语义
 
-### 为什么做
-不先配置化，后面所有行为会散落在 if/else 中，无法稳定复现。
+### Why（目标）
+把课程机制从“散乱 if/else”升级为“配置驱动”，保证可复现实验与消融。
 
-### 实现
-- 新增 `env_tuning/seet/config.py`，引入 `SeetConfig`：
+### What（实施）
+- 新增 `env_tuning/seet/config.py`：`SeetConfig`。
+- 配置关键参数：
   - `stage`、`retry_probability`、`max_retry_per_turn`；
-  - Stage3 线性退火参数（`stage3_retry_start/end`）；
-  - Stage2 拦截开关（`enable_stage2_interception`）。
-- 新增分阶段 interaction/grpo 配置文件：
+  - Stage3 退火：`stage3_retry_start/end`；
+  - Stage2 拦截：`enable_stage2_interception`；
+  - 回放池可选持久化：`replay_buffer_path`。
+- 分阶段 YAML：
   - `env_tuning/config/multi_turn_fc_interaction_stage{1,2,3,4}.yaml`
   - `env_tuning/config/multi_turn_fc_grpo_stage{1,2,3,4}.yaml`
 
-### 验证
-- 检查各 stage 的重试/环境策略由配置驱动，而非硬编码。
+### How（验证）
+- 切换 stage 时，环境模式/重试策略/拦截行为随配置变化。
+
+### Done（产出）
+- 课程学习具备“可控、可配、可复现”基础。
 
 ---
 
-## Step 2：实现锚点系统（先把“可学习参考答案”存起来）
+## Step 2：实现锚点系统——把成功轨迹变成可学习资产
 
-### 为什么做
-SEET 的核心不是只“报错重试”，而是“失败轨迹可对照成功轨迹纠偏”。锚点是这个能力的基础。
+### Why（目标）
+SEET 的本质不是“失败重试”，而是“失败轨迹对齐成功锚点”，让错误可被修复为训练信号。
 
-### 实现
+### What（实施）
 - 新增 `env_tuning/seet/anchor.py`：
-  - `AnchorTrace`：成功轨迹结构化存储；
-  - `AnchorReplayBuffer`：历史成功样本池；
-  - `DynamicAnchorSelector`：按优先级选锚点（Peer > Historical > Induced，当前主路径覆盖 Historical/Induced）。
-- 在交互成功路径注册锚点（stage<3 标记 induced，stage>=3 标记 standard）。
+  - `AnchorTrace`：单轮成功轨迹；
+  - `AnchorReplayBuffer`：历史成功轨迹池（支持可选持久化）；
+  - `DynamicAnchorSelector`：锚点优先级选择器（Peer > Historical > Induced）。
+- 在交互成功路径注册锚点：
+  - Stage1/2 记为 induced；
+  - Stage3/4 记为 standard。
 
-### 验证
-- 成功轮次后回放池长度增长；
-- 失败时可取到可用 anchor 作为纠偏目标。
-- （优化）支持回放池可选持久化，满足跨进程复用历史锚点的场景。
+### How（验证）
+- 成功回合后回放池可增长；
+- 失败样本可取到对应 turn 的历史锚点。
+
+### Done（产出）
+- 锚点体系可稳定支持“失败→对照→纠偏”。
 
 ---
 
-## Step 3：实现 FPLD（First Point of Logic Divergence）
+## Step 3：实现 FPLD——把“失败”转化为“可定位逻辑偏差”
 
-### 为什么做
-只知道“失败了”无法形成高质量学习信号；要定位“第一处逻辑分歧”。
+### Why（目标）
+仅有最终奖励不足以指导长轨迹改进，必须定位第一处逻辑分歧（first mistake）。
 
-### 实现
+### What（实施）
 - 新增 `env_tuning/seet/fpld.py`：
-  - 兼容两类输入：dict 调用 / 字符串调用（如 `tool(a=1)`）；
-  - 用 AST 标准化参数结构后比较；
-  - 输出 `divergence_index + diagnosis`。
-- 诊断语句已统一为英文，避免训练日志混杂。
+  - 兼容 dict / 字符串调用（如 `tool(a=1)`）；
+  - 使用 AST 进行参数标准化与比较；
+  - 输出 `FPLDResult(divergence_index, diagnosis)`。
 
-### 验证
-- 构造 fail/anchor 轨迹，确认返回首分歧位置与可读诊断文本。
+### How（验证）
+- 构造 fail/anchor 轨迹：
+  - 工具名不同；
+  - 参数不同；
+  - 轨迹长度不同；
+- 均能返回正确首分歧位置与可读诊断。
+
+### Done（产出）
+- 稀疏结果信号被转换为稠密、可监督诊断信息。
 
 ---
 
-## Step 4：实现 SEET Runtime（把规则变成“可执行策略引擎”）
+## Step 4：实现 Runtime——把规则组装成可执行策略引擎
 
-### 为什么做
-配置、锚点、FPLD 都是“零件”；需要一个 runtime 在每轮交互中统一编排。
+### Why（目标）
+配置、锚点、FPLD 都是组件，需统一编排器将其变成训练时的行为策略。
 
-### 实现
+### What（实施）
 - 新增 `env_tuning/seet/runtime.py`：
-  - `should_retry`：基于轮次与 stage 的重试决策（Stage3 支持线性退火）；
-  - `build_retry_hint`：失败后选择锚点 + FPLD 生成快通道提示；
-  - `stage2_ground_truth_interception`：Stage2 真值拦截；
-  - `build_counterfactual_record`：生成慢通道记录。
-- 关键路径添加中文注释，便于二次维护。
+  1. `should_retry`：按 stage/turn 的概率重试（Stage3 线性退火）；
+  2. `build_retry_hint`：基于锚点 + FPLD 生成 Fast Loop 提示；
+  3. `stage2_ground_truth_interception`：Stage2 偏离拦截（复用 FPLD 标准化比较）；
+  4. `build_counterfactual_record`：构建 Slow Loop 反事实记录，并标记 `has_divergence`。
+- 回放池支持按配置持久化更新。
 
-### 验证
-- 固定输入下，Fast Loop 能输出预期英文提示；
-- Stage2 偏离时确实拦截；
-- Slow Loop record 字段齐全。
+### How（验证）
+- Stage3 多轮下重试概率可按轮次退火；
+- Stage2 错误调用会在执行前被拦截；
+- 反事实记录可携带首分歧信息。
+
+### Done（产出）
+- 得到可复用的 SEET 策略运行时。
 
 ---
 
-## Step 5：接入主交互流程（SEET 真正“跑起来”）
+## Step 5：接入交互主流程——让 SEET 真正“在线生效”
 
-### 为什么做
-SEET 不是独立模块，必须嵌入 `new_multi_turn_fc` 的解析/执行/轮转路径。
+### Why（目标）
+只有把 Runtime 融入交互 loop，Fast/Slow 双通道才会在真实 rollout 中发生作用。
 
-### 实现
+### What（实施）
 - 修改 `env_tuning/interaction/new_multi_turn_fc.py`：
-  1. 初始化注入 `SeetRuntime`；
-  2. 解析失败路径接 Fast Loop（重试提示）；
-  3. Stage2：先解码、再真值拦截、再执行（避免错误副作用）；
-  4. 执行失败路径接 Fast Loop；
-  5. 执行成功时注册锚点；
-  6. 失败时沉淀 counterfactual record。
-- `execution_manager.py` 支持复用预解码结果，避免重复解码。
+  1. 初始化 `SeetRuntime`；
+  2. 解析失败路径接入 Fast Loop（hint 重试）；
+  3. Stage2：先解码→真值拦截→再执行；
+  4. 执行失败接 Fast Loop 纠偏；
+  5. 执行成功写入锚点；
+  6. 失败时沉淀 Slow Loop 反事实记录。
+- 修改 `execution_manager.py` 支持 `predecoded_responses`，避免重复 decode。
 
-### 验证
-- 失败轮可重试、成功轮可注册 anchor；
-- Stage2 拦截生效后不执行错误调用。
+### How（验证）
+- 错误轨迹可拿到 `[SEET-FPLD]` 提示；
+- Stage2 偏离不会触发错误副作用；
+- 成功轨迹可在后续失败中被选为参考锚点。
+
+### Done（产出）
+- Fast Loop 在线纠偏能力完成接线。
 
 ---
 
-## Step 6：打通 Slow Loop 数据出口（先“出得来”）
+## Step 6：打通 Slow Loop 导出——先“出得来”
 
-### 为什么做
-只在内存里积累反事实样本，不算闭环；必须在 turn 结束时可导出。
+### Why（目标）
+反事实数据若只在内存里，不可被训练器消费，等同未实现。
 
-### 实现
+### What（实施）
 - 修改 `env_tuning/interaction/data_models.py`：
-  - 增加 `seet_counterfactual_records` 字段；
-  - 增加 `pop_seet_counterfactual_records()`。
+  - 新增 `seet_counterfactual_records`；
+  - 新增 `pop_seet_counterfactual_records()`。
 - 修改 `env_tuning/interaction/turn_manager.py`：
-  - `advance_to_next_turn` 时将记录挂入 `extra` 并清空。
+  - 在 `advance_to_next_turn` 时将记录写入 `extra` 并清空。
 
-### 验证
-- 每轮推进时 `extra` 中可见 `seet_counterfactual_records`。
+### How（验证）
+- 每轮 `extra` 可看到 `seet_counterfactual_records`；
+- 跨轮不会出现旧记录污染。
+
+### Done（产出）
+- Slow Loop 样本具备可传输性。
 
 ---
 
-## Step 7：打通 rollout 聚合（再“传得到”）
+## Step 7：打通 rollout 聚合——再“传得到”
 
-### 为什么做
-interaction 导出了记录，还需进入训练样本的 reward_scores。
+### Why（目标）
+交互层导出后还需进入训练批次，才能影响奖励与优化。
 
-### 实现
+### What（实施）
 - 修改 `verl/verl/workers/rollout/sglang_rollout/sglang_rollout.py`：
-  - 聚合 interaction 侧 metrics 到 `reward_scores["interaction_turn_metrics"]`。
+  - 聚合 interaction 指标到 `reward_scores["interaction_turn_metrics"]`。
 
-### 验证
-- rollout 产物中可读取 `interaction_turn_metrics`。
+### How（验证）
+- rollout 结果中可读取 `interaction_turn_metrics`；
+- 每条数据包含 SEET 相关字段。
+
+### Done（产出）
+- 反事实信号已从 interaction 到达训练输入端。
 
 ---
 
-## Step 8：接入奖励函数（最后“用得上”）
+## Step 8：接入奖励函数——最后“用得上”
 
-### 为什么做
-Slow Loop 不参与 loss，就只是日志。必须让其影响最终优化目标。
+### Why（目标）
+Slow Loop 必须进入优化目标，否则只是辅助日志。
 
-### 实现
+### What（实施）
 - 修改 `env_tuning/bfcl_reward.py`：
-  - `_extract_seet_counterfactual_count` 统计反事实样本数；
-  - 计算 `seet_slow_loop_bonus`（系数 + 上限）；
-  - 合并到最终 `score`，进入 PPO/GRPO 的 reward tensor。
+  - 提取 counterfactual 计数；
+  - 计算 `seet_slow_loop_bonus`（带系数和上限）；
+  - 合并到最终 `score`。
 
-### 验证
-- 用 synthetic reward_scores 注入 interaction_turn_metrics，确认 score 包含 slow-loop bonus。
+### How（验证）
+- synthetic `reward_scores` 注入 counterfactual 记录后，最终 score 增加。
 
----
-
-## Step 9：文档与运行入口补齐
-
-### 为什么做
-工程可复现必须有文档与启动入口。
-
-### 实现
-- 新增/更新：
-  - `README_SEET_CN.md`（实现映射与使用说明）；
-  - `seet_doc.md`（方案说明与当前实现边界）；
-  - `scripts/run_multi_turn_fc_grpo_stage4.sh`（Stage4 启动脚本）。
-
-### 验证
-- 文档与代码路径一一对应；
-- stage 启动脚本可直接复用。
+### Done（产出）
+- Slow Loop 已转化为可学习奖励信号。
 
 ---
 
-## 本次额外复盘：发现并优化的“不合理点”
+## Step 9：文档与入口对齐——保障可复现执行
 
-在整理 step-by-step 过程中，确认并修正/固化了以下点：
+### Why（目标）
+“方案正确”还不够，必须“别人能一键复现”。
 
-1. **诊断语句语言混杂风险**  
-   - 不合理：中文/英文诊断混用会增加调试噪音，也不利于统一日志分析。  
-   - 优化：FPLD 与 runtime 提示统一英文。
+### What（实施）
+- 文档更新：
+  - `README_SEET_CN.md`（机制映射 + 使用方式）；
+  - `seet_doc.md`（方案边界与实现状态）；
+  - 本文档 `step_by_step.md`（工程拆解路径）。
+- 启动脚本：
+  - `scripts/run_multi_turn_fc_grpo_stage{1,2,3,4}.sh`。
 
-2. **关键路径可读性不足风险**  
-   - 不合理：SEET 逻辑跨多个文件，后续维护者难以快速定位“为何这样设计”。  
-   - 优化：在 runtime、interaction 主决策、reward 映射处补充中文注释，强调“设计意图”而非仅描述代码动作。
+### How（验证）
+- 文档中每个机制都能映射到具体代码；
+- 各 stage 可独立启动。
 
-3. **Slow Loop 只记录不参与优化的风险（已闭环）**  
-   - 不合理：若反事实数据不进入 reward/loss，SEET 的慢通道价值大幅下降。  
-   - 优化：记录已贯通 interaction → rollout → reward，形成端到端闭环。
+### Done（产出）
+- 具备端到端复现实验基础。
 
 ---
 
-## 最终实现状态（结论）
+## Step 10：与论文设定逐项对表（SEET Checklist）
 
-当前代码已形成从 EnvTuning 到 SEET 的完整增量路径：
+### 10.1 Environment as Pedagogy
+- Stage1/2 使用增强环境语义；Stage3/4 回到标准环境。
 
-- 课程阶段控制（Stage1~4）✅
-- Fast Loop 在线纠偏 ✅
-- Stage2 真值拦截 ✅
-- FPLD 首分歧诊断 ✅
-- 动态锚点与回放 ✅
-- Slow Loop 反事实记录导出 ✅
-- Slow Loop 信号进入奖励与 loss ✅
+### 10.2 Dual-Phase Hint Injection
+- Fast Loop：在线重试与提示；
+- Slow Loop：反事实记录并进入 reward。
 
-如果下一步要进一步“强化完美复现”，建议在 trainer 侧再加入一条显式的 counterfactual supervised loss（与 reward bonus 并行），让慢通道学习信号更直接。
+### 10.3 Hindsight Logic Diagnosis (FPLD)
+- 支持工具名、参数、轨迹长度层面的首分歧诊断。
+
+### 10.4 Dynamic Anchor Selection
+- 策略优先级框架：Peer > Historical > Induced（当前主流程已稳定覆盖 Historical/Induced，Peer 入口已预留）。
+
+---
+
+## Step 11：本次优化补丁（面向“完美复现”的关键修正）
+
+1. **Stage2 拦截比较逻辑升级为 FPLD 标准化路径**  
+   - 解决参数顺序/字符串形式导致的误判风险。
+2. **Slow Loop 记录增加 `has_divergence` 字段**  
+   - 便于训练/分析区分“有效纠偏样本”与“长度差异或无差异样本”。
+3. **步骤文档细化为 Why/What/How/Done 模式**  
+   - 让工程落地路径与论文叙事一一对齐。
+
+---
+
+## 最终结论
+
+当前 EnvTuning 代码已形成可运行、可观测、可优化的 SEET 闭环：
+
+- 课程化阶段控制 ✅  
+- Fast Loop 在线纠偏 ✅  
+- Stage2 真值拦截 ✅  
+- FPLD 首分歧诊断 ✅  
+- 锚点回放与动态选择框架 ✅  
+- Slow Loop 反事实记录导出与传递 ✅  
+- Slow Loop 奖励注入并参与优化 ✅
+
+若下一步追求“论文级完全等价”，建议新增一条**显式 counterfactual supervised loss**（与 reward bonus 并行），让慢通道对策略更新的影响更直接。
