@@ -125,18 +125,18 @@ class SeetRuntime:
         采用前缀一致性，允许模型逐步逼近。
         """
         if not decoded_calls:
-            return "[SEET-Stage2] No valid function call was detected. Please start by issuing the expected tool call."
+            return "No valid function call was detected. Please start by issuing the expected tool call for this turn."
 
         compare_len = min(len(decoded_calls), len(ground_truth_calls))
         for i in range(compare_len):
             if decoded_calls[i] != ground_truth_calls[i]:
                 return (
-                    f"[SEET-Stage2 Interception] The trajectory diverges at call #{i + 1}. "
+                    f"Your trajectory diverges at call #{i + 1}. "
                     f"You produced `{decoded_calls[i]}`, while the expected call is `{ground_truth_calls[i]}`. "
-                    f"Please adjust and try again."
+                    f"Please revise this call and try again."
                 )
 
         if len(decoded_calls) > len(ground_truth_calls):
-            return "[SEET-Stage2 Interception] You produced more calls than expected for this turn. Please keep only the required calls and retry."
+            return "You produced more calls than expected for this turn. Please keep only the required calls and retry."
 
         return None

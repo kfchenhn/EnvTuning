@@ -31,7 +31,7 @@ SEET（Self-Play with Environment Tuning）用于多轮工具调用智能体训�
 
 ### 2.4 Stage2 真值拦截
 
-- 当模型调用与 ground truth 前缀不一致时，立即拦截并给出更自然的英文纠偏提示。
+- 当模型调用与 ground truth 前缀不一致时，立即拦截并给出更自然的英文纠偏提示（不再带 `[SEET-Stage2 Interception]` 标签，避免模型误把标签当任务文本）。
 - 目标是降低冷启动阶段错误副作用，并更稳定地产生可学习的反事实样本。
 
 
