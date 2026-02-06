@@ -8,13 +8,13 @@ defaults:
 
 
 custom_reward_function:
-  path: env_tuning/format_reward.py
+  path: env_tuning/bfcl_reward.py
   name: compute_score
 
 
 data:
   max_prompt_length: 8192
-  max_response_length: 10000
+  max_response_length: 24576
   return_raw_chat: True
 
 actor_rollout_ref:
@@ -24,7 +24,7 @@ actor_rollout_ref:
     multi_turn:
       enable: True
       max_turns: 100
-      interaction_config_path: "env_tuning/config/multi_turn_fc_interaction_stage1.yaml"
+      interaction_config_path: "env_tuning/config/multi_turn_fc_interaction_stage4.yaml"
       format: qwen
     max_model_len: 32768
   actor:

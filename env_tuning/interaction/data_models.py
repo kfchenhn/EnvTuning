@@ -64,6 +64,7 @@ class InstanceState:
     all_turn_model_execution_results: List[Any] = field(default_factory=list)
     single_turn_model_execution_results: List[Any] = field(default_factory=list)
     single_turn_model_response_decode_list: List[Any] = field(default_factory=list)
+    seet_counterfactual_records: List[Dict[str, Any]] = field(default_factory=list)
 
     def reset_single_turn_buffers(self) -> None:
         """在进入下一轮对话时调用，清空本轮缓存。"""
@@ -82,6 +83,12 @@ class InstanceState:
         """
         self.all_turn_model_execution_results.extend(self.single_turn_model_execution_results)
         self.single_turn_model_execution_results.clear()
+
+    def pop_seet_counterfactual_records(self) -> List[Dict[str, Any]]:
+        """取出并清空当前累计的 SEET 反事实记录。"""
+        records = list(self.seet_counterfactual_records)
+        self.seet_counterfactual_records.clear()
+        return records
 
     def __repr__(self) -> str:
         return f"InstanceState({asdict(self)})"

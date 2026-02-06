@@ -19,43 +19,46 @@ from typing import Dict, List, Optional, Tuple, Any
 from uuid import uuid4
 
 from verl.interactions.base import BaseInteraction
+from bfcl_env.multi_turn_utils import execute_multi_turn_func_call
+
 from .data_models import InstanceState, ResponseData, ResponseType, ExecutionResult
 from .response_handler import ResponseHandler
 from .execution_manager import ExecutionManager
 from .score_calculator import ScoreCalculator
 from .turn_manager import TurnManager
-from bfcl_env.multi_turn_utils import execute_multi_turn_func_call
+from env_tuning.seet import SeetConfig, SeetRuntime
 
 
 class MultiTurnFunctionCallInteraction(BaseInteraction):
-    """多轮函数调用交互主类"""
-    
+    """多轮函数调用交互主类（集成 SEET 快慢双通道）。"""
+
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
         self.name = config.get("name", "multi_turn_function_call")
         self._instance_dict: Dict[str, InstanceState] = {}
         self.max_step_limit = 5
-        
-        # 初始化模块化处理器
+
+        # SEET 运行时（可选）
+        self.seet_config = SeetConfig(**config.get("seet", {}))
+        self.seet_runtime = SeetRuntime(self.seet_config) if self.seet_config.enabled else None
+
         self.response_handler = ResponseHandler()
         self.execution_manager = ExecutionManager()
         self.score_calculator = ScoreCalculator()
         self.turn_manager = TurnManager(self.score_calculator)
 
     async def start_interaction(self, instance_id: Optional[str] = None, **kwargs) -> str:
-        """创建工具实例"""
+        """创建交互实例。"""
         if instance_id is None:
             instance_id = str(uuid4())
-        
+
         entry_id: str = kwargs["id"]
         initial_config: Dict[str, Any] = json.loads(kwargs["initial_config"])
         involved_classes: Dict[str, Any] = kwargs["involved_classes"]
         ground_truth: List[Any] = kwargs["ground_truth"]
         processed_question: List[str] = kwargs["processed_question"]
         question: List[str] = kwargs["question"]
-        total_turns = len(question)
-        
-        # 执行空函数调用以获取初始实例引用
+
         _, model_instances = execute_multi_turn_func_call(
             [],
             initial_config,
@@ -65,8 +68,7 @@ class MultiTurnFunctionCallInteraction(BaseInteraction):
             long_context=("long_context" in entry_id or "composite" in entry_id),
             is_evaL_run=False,
         )
-        
-        # 执行空函数调用以获取ground truth实例引用
+
         execute_multi_turn_func_call(
             [],
             initial_config,
@@ -76,106 +78,229 @@ class MultiTurnFunctionCallInteraction(BaseInteraction):
             long_context=("long_context" in entry_id or "composite" in entry_id),
             is_evaL_run=True,
         )
-        
-        state = InstanceState(
+
+        self._instance_dict[instance_id] = InstanceState(
             initial_config=initial_config,
             involved_classes=involved_classes,
             ground_truth=ground_truth,
             processed_question=processed_question,
             question=question,
             involved_instances=model_instances,
-            total_turns=total_turns,
+            total_turns=len(question),
         )
-        
-        self._instance_dict[instance_id] = state
         return instance_id
 
-    async def generate_response(self, instance_id: str, messages: List[Dict[str, Any]], **kwargs) -> Tuple[bool, str, float, Dict[str, Any]]:
-        """简化的响应生成方法 - 只负责协调各个模块"""
+    async def generate_response(
+        self,
+        instance_id: str,
+        messages: List[Dict[str, Any]],
+        **kwargs,
+    ) -> Tuple[bool, str, float, Dict[str, Any]]:
+        """生成交互响应。"""
         state = self._instance_dict[instance_id]
         entry_id = kwargs["id"]
-        
-        # 1. 解析响应
+
         response_data = self.response_handler.parse_and_validate(messages)
         if response_data.has_error:
-            return await self._handle_response_error(response_data, state, entry_id)
-        
-        # 2. 处理特殊情况（answer模式、无ground truth等）
+            return await self._handle_response_error(instance_id, response_data, state, entry_id)
+
         special_case_result = self._handle_special_cases(response_data, state, entry_id)
         if special_case_result:
             return special_case_result
-        
-        # 3. 执行函数调用
-        execution_result = self._execute_function_calls(response_data, state, instance_id, entry_id)
-        
-        # 4. 检查是否需要继续或结束
+
+        predecoded_calls: Optional[List[Any]] = None
+        if response_data.response_type == ResponseType.TOOL_CALL:
+            predecoded_calls = self.execution_manager.decode_tool_calls(response_data.content)
+            stage2_intercept = self._maybe_stage2_intercept(state, predecoded_calls)
+            if stage2_intercept is not None:
+                return stage2_intercept
+
+        execution_result = self._execute_function_calls(
+            response_data,
+            state,
+            instance_id,
+            entry_id,
+            predecoded_calls,
+        )
         return self._determine_next_action(execution_result, state, entry_id)
-    
-    async def _handle_response_error(self, response_data: ResponseData, state: InstanceState, entry_id: str) -> Tuple[bool, str, float, Dict[str, Any]]:
-        """处理响应错误"""
+
+    # 中文注释：解析失败后的快通道入口；若命中重试策略则回注 SEET 英文诊断提示。
+    async def _handle_response_error(
+        self,
+        instance_id: str,
+        response_data: ResponseData,
+        state: InstanceState,
+        entry_id: str,
+    ) -> Tuple[bool, str, float, Dict[str, Any]]:
+        """处理解析错误，并在 SEET 下尝试快通道重试。"""
         state.current_turn_attempt_counts += 1
-        
+
         if self.turn_manager.should_force_quit(state, self.max_step_limit):
             should_term, content, score, extra = self.turn_manager.advance_to_next_turn(state, entry_id)
             if should_term:
-                await self.finalize_interaction(instance_id=entry_id)
-            
-            # 检查是否无ground truth情况
-            ground_truth_calls = self.turn_manager._get_ground_truth_calls(state, state.current_turn_index - 1)
-            if not ground_truth_calls:
+                await self.finalize_interaction(instance_id=instance_id)
+
+            prev_gt = self.turn_manager._get_ground_truth_calls(state, state.current_turn_index - 1)
+            if not prev_gt:
                 score = 0.0
-            
             return should_term, content, score, extra
-        
+
+        if self.seet_runtime and self.seet_runtime.should_retry(
+            state.current_turn_attempt_counts,
+            turn_index=state.current_turn_index,
+            total_turns=state.total_turns,
+        ):
+            retry = self.seet_runtime.build_retry_hint(
+                stage=self.seet_config.stage,
+                entry_id=entry_id,
+                turn_index=state.current_turn_index,
+                fail_calls=[],
+                induced_calls=self._get_current_turn_ground_truth(state),
+            )
+            if retry.should_retry:
+                return False, retry.hint_text, -1.0, {"seet_fast_loop": True, "channel": "fast"}
+
         return False, response_data.error_message or "Parse error", -3.0, {}
-    
-    def _handle_special_cases(self, response_data: ResponseData, state: InstanceState, entry_id: str) -> Optional[Tuple[bool, str, float, Dict[str, Any]]]:
-        """处理特殊情况"""
-        ground_truth_calls = self.turn_manager._get_ground_truth_calls(state, state.current_turn_index)
-        
-        # 处理无ground truth的轮次
-        if not ground_truth_calls:
-            should_term, content, base_score, extra = self.turn_manager.advance_to_next_turn(state, entry_id)
-            assert base_score == -1.0, "Ground truth call list is empty, returned score should be -1.0"
-            if response_data.response_type == ResponseType.ANSWER:
-                return should_term, content, 1.0, extra
-            elif response_data.response_type == ResponseType.TOOL_CALL:
-                warning_hint = "(SYSTEM WARNING: You should not call any function in this turn because certain function description(s) or parameter(s) is missing in this turn. Previous turn is forced quit. Current function(s) will not be executed.) Next turn question:\n"
-                return should_term, warning_hint + content, 0.0, extra
-        
-        return None
-    
-    def _execute_function_calls(self, response_data: ResponseData, state: InstanceState, instance_id: str, entry_id: str) -> ExecutionResult:
-        """执行函数调用"""
-        return self.execution_manager.execute_function_calls(response_data.content, state, instance_id, entry_id)
-    
-    def _determine_next_action(self, execution_result: ExecutionResult, state: InstanceState, entry_id: str) -> Tuple[bool, str, float, Dict[str, Any]]:
-        """决定下一步行动"""
+
+    def _handle_special_cases(
+        self,
+        response_data: ResponseData,
+        state: InstanceState,
+        entry_id: str,
+    ) -> Optional[Tuple[bool, str, float, Dict[str, Any]]]:
+        """处理无 GT 的轮次。"""
+        ground_truth_calls = self._get_current_turn_ground_truth(state)
+        if ground_truth_calls:
+            return None
+
+        should_term, content, base_score, extra = self.turn_manager.advance_to_next_turn(state, entry_id)
+        assert base_score == -1.0
+
+        if response_data.response_type == ResponseType.ANSWER:
+            return should_term, content, 1.0, extra
+
+        warning_hint = (
+            "(SYSTEM WARNING: You should not call any function in this turn because certain function "
+            "description(s) or parameter(s) is missing in this turn. Previous turn is forced quit. "
+            "Current function(s) will not be executed.) Next turn question:\n"
+        )
+        return should_term, warning_hint + content, 0.0, extra
+
+    # 中文注释：Stage2 真值拦截，先纠偏再执行，避免错误调用直接落地。
+    def _maybe_stage2_intercept(
+        self,
+        state: InstanceState,
+        decoded_calls: List[Any],
+    ) -> Optional[Tuple[bool, str, float, Dict[str, Any]]]:
+        """Stage2 真值拦截：偏离即提示重试，不执行错误调用。"""
+        if not self.seet_runtime or self.seet_config.stage != 2 or not self.seet_config.enable_stage2_interception:
+            return None
+
+        gt_calls = self._get_current_turn_ground_truth(state)
+        if not gt_calls:
+            return None
+
+        hint = self.seet_runtime.stage2_ground_truth_interception(decoded_calls, gt_calls)
+        if hint is None:
+            return None
+
+        # 记录慢通道样本（反事实：失败调用 -> GT 调用）
+        state.seet_counterfactual_records.append(
+            self.seet_runtime.build_counterfactual_record(decoded_calls, gt_calls)
+        )
+        state.current_turn_attempt_counts += 1
+        return False, hint, -1.0, {"seet_fast_loop": True, "channel": "fast", "reason": "stage2_interception"}
+
+    def _execute_function_calls(
+        self,
+        response_data: ResponseData,
+        state: InstanceState,
+        instance_id: str,
+        entry_id: str,
+        predecoded_calls: Optional[List[Any]] = None,
+    ) -> ExecutionResult:
+        """执行函数调用。"""
+        return self.execution_manager.execute_function_calls(
+            response_data.content,
+            state,
+            instance_id,
+            entry_id,
+            predecoded_responses=predecoded_calls,
+        )
+
+    # 中文注释：执行后主决策点——负责成功锚点登记、执行错误重试与慢通道样本沉淀。
+    def _determine_next_action(
+        self,
+        execution_result: ExecutionResult,
+        state: InstanceState,
+        entry_id: str,
+    ) -> Tuple[bool, str, float, Dict[str, Any]]:
+        """根据执行结果决定是否继续。"""
         if not execution_result.should_continue:
             return self.turn_manager.advance_to_next_turn(state, entry_id)
-        
-        # 更新状态
+
         state.involved_instances = execution_result.new_instances
         state.add_exec_results(execution_result.execution_results)
         state.current_turn_attempt_counts += 1
-        
-        # 检查是否需要强制退出
+
         if self.turn_manager.should_force_quit(state, self.max_step_limit):
             return self.turn_manager.advance_to_next_turn(state, entry_id)
-        
-        # 准备继续执行的响应
+
         user_hint, score = self.execution_manager.format_execution_response(
-            execution_result.execution_results, 
-            execution_result.has_error
+            execution_result.execution_results,
+            execution_result.has_error,
+            stage=self.seet_config.stage if self.seet_config.enabled else None,
+            augmented_env=self.seet_config.use_augmented_env if self.seet_config.enabled else False,
         )
-        
+
+        self._register_success_anchor_if_needed(state, entry_id, execution_result)
+
+        if self.seet_runtime and execution_result.has_error and self.seet_runtime.should_retry(
+            state.current_turn_attempt_counts,
+            turn_index=state.current_turn_index,
+            total_turns=state.total_turns,
+        ):
+            retry = self.seet_runtime.build_retry_hint(
+                stage=self.seet_config.stage,
+                entry_id=entry_id,
+                turn_index=state.current_turn_index,
+                fail_calls=execution_result.decoded_responses or [],
+                induced_calls=self._get_current_turn_ground_truth(state),
+            )
+            if retry.should_retry:
+                if retry.anchor_calls is not None:
+                    state.seet_counterfactual_records.append(
+                        self.seet_runtime.build_counterfactual_record(
+                            execution_result.decoded_responses or [],
+                            retry.anchor_calls,
+                        )
+                    )
+                return (
+                    False,
+                    user_hint + "\n\n" + retry.hint_text,
+                    min(score, -1.0),
+                    {"seet_fast_loop": True, "channel": "fast", "reason": "execution_error"},
+                )
+
         return False, user_hint, score, {}
 
+    def _register_success_anchor_if_needed(self, state: InstanceState, entry_id: str, execution_result: ExecutionResult) -> None:
+        if not self.seet_runtime or execution_result.has_error:
+            return
+
+        self.seet_runtime.on_success(
+            entry_id=entry_id,
+            turn_index=state.current_turn_index,
+            decoded_calls=execution_result.decoded_responses or [],
+            anchor_type="standard" if self.seet_config.stage >= 3 else "induced",
+        )
+
+    def _get_current_turn_ground_truth(self, state: InstanceState) -> List[Any]:
+        return self.turn_manager._get_ground_truth_calls(state, state.current_turn_index)
+
     async def calculate_score(self) -> float:
-        """计算交互评分"""
         return 0.0
-    
+
     async def finalize_interaction(self, instance_id: str = None, **kwargs) -> None:
-        """清理交互资源"""
         if instance_id and instance_id in self._instance_dict:
             del self._instance_dict[instance_id]

@@ -52,10 +52,13 @@ class TurnManager:
         # 准备下一个问题
         should_terminate, next_question = self._prepare_next_question(state)
         
+        # 输出并清空慢通道反事实记录
+        seet_records = state.pop_seet_counterfactual_records()
+
         # 重置单轮缓存
         state.reset_single_turn_buffers()
-        
-        return should_terminate, next_question, score, {}
+
+        return should_terminate, next_question, score, {"seet_counterfactual_records": seet_records}
     
     def _get_ground_truth_calls(self, state: InstanceState, turn_index: int) -> list:
         """
