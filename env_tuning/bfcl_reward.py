@@ -55,6 +55,7 @@ def compute_score(
     tool_call_reward = correct_tool_call / (correct_tool_call + error_tool_call) if is_tool_call > 0 else 0.0
 
     # ----------------- SEET 慢通道加成 -----------------
+    # 中文注释：该 bonus 将 Slow Loop 样本显式投影到最终 reward。
     seet_counterfactual_count = _extract_seet_counterfactual_count(reward_scores)
     seet_slow_loop_bonus = min(seet_slow_loop_cap, seet_counterfactual_count * seet_slow_loop_coef)
 

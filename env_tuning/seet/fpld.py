@@ -77,6 +77,7 @@ def _normalize_step(step: Any) -> ToolNode:
 
 def first_logic_divergence(fail_path: List[Any], anchor_path: List[Any]) -> FPLDResult:
     """定位第一逻辑分歧点（FPLD）。"""
+    # 中文说明：按最短轨迹对齐比较，优先找到“第一处”可定位偏差。
     shortest = min(len(fail_path), len(anchor_path))
 
     for idx in range(shortest):
@@ -85,18 +86,18 @@ def first_logic_divergence(fail_path: List[Any], anchor_path: List[Any]) -> FPLD
 
         if fail_node.tool_name != anchor_node.tool_name or fail_node.arguments != anchor_node.arguments:
             diagnosis = (
-                f"在第 {idx + 1} 步出现第一逻辑分歧："
-                f"你执行了 {fail_node.tool_name}({fail_node.arguments})，"
-                f"锚点轨迹执行的是 {anchor_node.tool_name}({anchor_node.arguments})。"
+                f"First logic divergence at step {idx + 1}: "
+                f"your call was {fail_node.tool_name}({fail_node.arguments}), "
+                f"while the anchor call was {anchor_node.tool_name}({anchor_node.arguments})."
             )
             return FPLDResult(divergence_index=idx, diagnosis=diagnosis)
 
     if len(fail_path) != len(anchor_path):
         idx = shortest
         diagnosis = (
-            f"在第 {idx + 1} 步出现长度分歧：失败轨迹长度={len(fail_path)}，"
-            f"锚点轨迹长度={len(anchor_path)}。"
+            f"Length divergence at step {idx + 1}: fail trace length={len(fail_path)}, "
+            f"anchor trace length={len(anchor_path)}."
         )
         return FPLDResult(divergence_index=idx, diagnosis=diagnosis)
 
-    return FPLDResult(divergence_index=None, diagnosis="未检测到逻辑分歧。")
+    return FPLDResult(divergence_index=None, diagnosis="No logic divergence detected.")

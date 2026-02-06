@@ -1,114 +1,71 @@
-# SEET 方案介绍与在 EnvTuning 中的实现
+# SEET 方案介绍与在 EnvTuning 中的实现（更新版）
 
-## 1. 什么是 SEET
+## 1. 方案概览
 
-SEET（Self-Play with Environment Tuning）是一个面向多轮工具调用智能体的训练范式，核心思想是：
+SEET（Self-Play with Environment Tuning）用于多轮工具调用智能体训练，核心是把“环境反馈”从被动评测改造成主动教学。
 
-- **环境不是被动评测器，而是主动教学器（Environment as Pedagogy）**；
-- **错误不是纯惩罚信号，而是可转化的数据资产（Error as Data）**；
-- 通过 **快通道（在线重试）+ 慢通道（反事实训练）**，逐步把“提示依赖”内化为“策略能力”。
-
-SEET 的目标是破解智能体训练里的三难困境：数据稀缺、环境复杂、奖励稀疏。
+- Environment as Pedagogy：环境在早期提供可操作引导。
+- Error as Data：失败轨迹不只是惩罚，还会沉淀为可训练样本。
+- Fast/Slow Loop：在线纠偏 + 离线内化的双通道闭环。
 
 ---
 
-## 2. SEET 的四个核心机制
+## 2. 当前代码实现要点
 
-### 2.1 环境即教学（Environment as Pedagogy）
+### 2.1 Fast Loop（在线纠偏）
 
-将环境划分为两种模式：
+- 解析失败或执行失败时，`SeetRuntime.build_retry_hint` 会尝试选择锚点并生成重试提示。
+- **本次更新后，诊断语句统一改为英文**（含 FPLD 诊断、Stage2 拦截提示、通用 SEET 重试提示），降低多语言混杂导致的歧义。
 
-- **增强环境（Stage1/2）**：出现错误时返回可操作提示（hint），帮助跨过冷启动；
-- **标准环境（Stage3/4）**：逐步去提示，逼近真实线上场景。
+### 2.2 Slow Loop（反事实样本）
 
-在实现上由 `SeetConfig.stage` 控制，并在执行反馈中显式注入 `stage` 与 `environment mode`，让模型感知当前课程阶段。
+- `build_counterfactual_record` 生成 `fail_calls / anchor_calls / divergence_index / diagnosis`。
+- 记录通过 `seet_counterfactual_records` 从 interaction 侧传到 rollout，再由 `bfcl_reward.py` 提取并形成 `seet_slow_loop_bonus`，进入最终 reward。
 
-### 2.2 双通道提示注入（Fast/Slow Loop）
+### 2.3 FPLD（第一逻辑分歧点）
 
-- **Fast Loop（快通道）**：解析错误/执行错误时，在线注入提示并重试；
-- **Slow Loop（慢通道）**：把“失败轨迹 vs 锚点轨迹”转成反事实样本（counterfactual records），用于后续训练。
+- 支持两类轨迹输入：
+  1) dict 结构调用；
+  2) 字符串调用（如 `tool(a=1)`）。
+- 使用 AST 做归一化后比较，输出第一处分歧与英文诊断文本。
 
-### 2.3 FPLD（第一逻辑分歧点诊断）
+### 2.4 Stage2 真值拦截
 
-对失败轨迹和锚点轨迹做结构化比较，定位第一处逻辑偏差：
-
-- 在哪一步偏离；
-- 偏离的是工具名还是参数；
-- 给出可操作诊断文本。
-
-本实现支持 dict 调用与字符串调用（如 `tool(a=1)`）两种格式，使用 AST 归一化后比较。
-
-### 2.4 动态锚点选择（Dynamic Anchor Selection）
-
-按优先级选择纠偏目标：
-
-1. Peer Anchor（同批次成功样本，Stage3+）
-2. Historical Anchor（历史自我成功样本，Stage3/4）
-3. Induced Anchor（Stage2 课程诱导锚点）
-
-当前实现已覆盖 Historical + Induced 的核心路径，Peer 保留接口位。
+- 当模型调用与 ground truth 前缀不一致时，立即拦截并给出英文纠偏提示。
+- 目标是降低冷启动阶段错误副作用，并更稳定地产生可学习的反事实样本。
 
 ---
 
-## 3. 四阶段课程学习（Stage1~4）
+## 3. 关键文件映射
 
-### Stage1：格式与语法
-- 目标：输出合法工具调用格式；
-- 行为：高重试、强提示。
-
-### Stage2：真值拦截冷启动
-- 目标：学会正确依赖和参数；
-- 行为：先解码，再做 Ground Truth Interception，偏离即纠偏重试；
-- 结果：沉淀课程诱导锚点与反事实记录。
-
-### Stage3：自博弈内化
-- 目标：减少对提示依赖；
-- 行为：环境转标准模式，重试概率按课程进度线性退火（1.0→0.2）。
-
-### Stage4：鲁棒性实战
-- 目标：零提示条件下稳定完成任务；
-- 行为：关闭重试。
+- `env_tuning/seet/fpld.py`：FPLD 归一化与英文诊断。
+- `env_tuning/seet/runtime.py`：重试策略、锚点选择、Stage2 拦截、慢通道样本构造。
+- `env_tuning/interaction/new_multi_turn_fc.py`：主流程编排（快慢通道接入点）。
+- `env_tuning/bfcl_reward.py`：Slow Loop 统计与奖励加成。
 
 ---
 
-## 4. 当前代码映射
+## 4. 可读性增强（本次补充）
 
-- `env_tuning/seet/config.py`：SEET 配置与阶段控制。  
-- `env_tuning/seet/fpld.py`：FPLD 诊断。  
-- `env_tuning/seet/anchor.py`：锚点与回放池。  
-- `env_tuning/seet/runtime.py`：重试策略、锚点选择、慢通道样本构造、Stage2 拦截逻辑。  
-- `env_tuning/interaction/new_multi_turn_fc.py`：主交互编排（接入 Fast/Slow Loop）。  
-- `env_tuning/interaction/turn_manager.py`：轮切换时导出 `seet_counterfactual_records`。  
-- `env_tuning/config/multi_turn_fc_interaction_stage*.yaml`：分阶段行为配置。  
+根据你的要求，已在关键路径添加中文注释，重点覆盖：
 
----
+- `SeetRuntime`：课程策略中枢职责、锚点选择、Slow Loop 样本构造。
+- `new_multi_turn_fc.py`：解析失败快通道入口、Stage2 拦截入口、执行结果处理入口。
+- `bfcl_reward.py`：Slow Loop bonus 如何映射到最终 reward。
 
-## 5. 为什么这个实现接近“完整复现”
-
-1. **机制齐全**：环境调优、快慢通道、FPLD、动态锚点、Stage2 真值拦截全部具备。  
-2. **训练可接入**：慢通道样本会随 turn extra 输出，便于直接接入 loss 构造。  
-3. **课程可控**：每个 stage 的重试策略和环境模式配置化。  
-4. **可读性优先**：核心算法在 `seet/`，交互层只做流程编排，函数职责清晰。
+这些注释的目标是：让读代码时先理解“为什么这样做”，再看“具体怎么做”。
 
 ---
 
+## 5. 与“完整复现”目标的对应关系
 
-## 6. Slow Loop 端到端闭环（本次新增）
+当前实现已覆盖：
 
-本仓库当前已将 `seet_counterfactual_records` 直接接入训练奖励路径：
+1. 四阶段课程（Stage1~4）与分阶段重试/环境策略；
+2. Fast Loop 在线重试；
+3. Slow Loop 反事实记录；
+4. FPLD 分歧定位；
+5. Stage2 真值拦截；
+6. Slow Loop 信号进入 reward 的端到端闭环。
 
-1. `TurnManager.advance_to_next_turn()` 会把当轮反事实记录放入 `extra`：
-   `{"seet_counterfactual_records": ...}`。
-2. `sglang_rollout` 会把 interaction 侧 `metrics` 聚合到 `reward_scores["interaction_turn_metrics"]`。
-3. `env_tuning/bfcl_reward.py` 从 `interaction_turn_metrics` 提取反事实数量，
-   计算 `seet_slow_loop_bonus`，并直接加到最终 `score`。
-
-这样慢通道样本不仅被记录，而且会实际影响 PPO/GRPO 的 reward tensor，实现 end-to-end 闭环。
-
----
-
-## 7. 后续可选增强（非必须）
-
-- 在 trainer 侧直接消费 `seet_counterfactual_records`，把慢通道纳入正式训练损失；
-- 增加 batch 级 Peer Anchor 检索器，补齐最高优先级锚点路径；
-- 引入更细粒度的参数等价比较（例如顺序无关 dict/list 归一化）以进一步增强 FPLD 稳健性。
+如需继续提升，可在 trainer 侧加入“直接消费 counterfactual record 的监督项”，进一步强化慢通道学习强度。

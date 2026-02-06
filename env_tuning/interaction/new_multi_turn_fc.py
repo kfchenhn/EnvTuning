@@ -124,6 +124,7 @@ class MultiTurnFunctionCallInteraction(BaseInteraction):
         )
         return self._determine_next_action(execution_result, state, entry_id)
 
+    # 中文注释：解析失败后的快通道入口；若命中重试策略则回注 SEET 英文诊断提示。
     async def _handle_response_error(
         self,
         instance_id: str,
@@ -185,6 +186,7 @@ class MultiTurnFunctionCallInteraction(BaseInteraction):
         )
         return should_term, warning_hint + content, 0.0, extra
 
+    # 中文注释：Stage2 真值拦截，先纠偏再执行，避免错误调用直接落地。
     def _maybe_stage2_intercept(
         self,
         state: InstanceState,
@@ -226,6 +228,7 @@ class MultiTurnFunctionCallInteraction(BaseInteraction):
             predecoded_responses=predecoded_calls,
         )
 
+    # 中文注释：执行后主决策点——负责成功锚点登记、执行错误重试与慢通道样本沉淀。
     def _determine_next_action(
         self,
         execution_result: ExecutionResult,

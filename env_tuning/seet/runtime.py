@@ -17,6 +17,8 @@ class RetryDecision:
 class SeetRuntime:
     """SEET 运行时：快通道重试 + 锚点维护 + FPLD 诊断 + 慢通道记录构造。"""
 
+    # 中文注释：该类是 SEET 的策略中枢，负责把课程配置转成可执行控制逻辑。
+
     def __init__(self, config: SeetConfig):
         self.config = config
         self.replay_buffer = AnchorReplayBuffer()
@@ -50,6 +52,7 @@ class SeetRuntime:
             )
         )
 
+    # 中文注释：按 Stage 策略选择锚点轨迹，作为失败样本的纠偏参考。
     def choose_anchor_calls(
         self,
         stage: int,
@@ -87,17 +90,18 @@ class SeetRuntime:
         if not fail_calls:
             return RetryDecision(
                 should_retry=True,
-                hint_text="系统提示（SEET）：你上一步没有形成有效工具调用，请根据任务目标和参数约束重新调用函数。",
+                hint_text="[SEET] No valid tool call was produced in the previous step. Please retry with a valid function call that matches the task goal and argument constraints.",
                 anchor_calls=anchor_calls,
             )
 
         fpld: FPLDResult = first_logic_divergence(fail_calls, anchor_calls)
         return RetryDecision(
             should_retry=True,
-            hint_text=f"系统提示（SEET-FPLD）：{fpld.diagnosis}",
+            hint_text=f"[SEET-FPLD] {fpld.diagnosis}",
             anchor_calls=anchor_calls,
         )
 
+    # 中文注释：Slow Loop 核心数据结构，后续会被奖励函数或训练器消费。
     def build_counterfactual_record(self, fail_calls: List[Any], anchor_calls: List[Any]) -> Dict[str, Any]:
         """构造慢通道反事实训练记录。"""
         fpld = first_logic_divergence(fail_calls, anchor_calls)
@@ -114,17 +118,17 @@ class SeetRuntime:
         采用前缀一致性，允许模型逐步逼近。
         """
         if not decoded_calls:
-            return "系统提示（SEET-Stage2）：当前没有有效函数调用，请先发起正确的工具调用。"
+            return "[SEET-Stage2] No valid function call detected. Please issue the correct tool call first."
 
         compare_len = min(len(decoded_calls), len(ground_truth_calls))
         for i in range(compare_len):
             if decoded_calls[i] != ground_truth_calls[i]:
                 return (
-                    f"系统提示（SEET-Stage2 真值拦截）：在第 {i + 1} 个调用处偏离目标。"
-                    f"你输出的是 `{decoded_calls[i]}`，建议参考正确调用 `{ground_truth_calls[i]}` 并重试。"
+                    f"[SEET-Stage2 Interception] Deviation detected at call #{i + 1}. "
+                    f"Your call was `{decoded_calls[i]}`; expected `{ground_truth_calls[i]}`. Please retry."
                 )
 
         if len(decoded_calls) > len(ground_truth_calls):
-            return "系统提示（SEET-Stage2 真值拦截）：当前调用数量超过该轮目标，请精简后重试。"
+            return "[SEET-Stage2 Interception] The number of calls exceeds the target for this turn. Please reduce and retry."
 
         return None
