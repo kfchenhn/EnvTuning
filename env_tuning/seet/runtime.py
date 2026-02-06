@@ -117,6 +117,7 @@ class SeetRuntime:
             "anchor_calls": anchor_calls,
             "divergence_index": fpld.divergence_index,
             "diagnosis": fpld.diagnosis,
+            "has_divergence": (fpld.divergence_index is not None and fpld.divergence_index >= 0),
         }
 
     def stage2_ground_truth_interception(self, decoded_calls: List[Any], ground_truth_calls: List[Any]) -> Optional[str]:
@@ -127,14 +128,14 @@ class SeetRuntime:
         if not decoded_calls:
             return "No valid function call was detected. Please start by issuing the expected tool call for this turn."
 
-        compare_len = min(len(decoded_calls), len(ground_truth_calls))
-        for i in range(compare_len):
-            if decoded_calls[i] != ground_truth_calls[i]:
-                return (
-                    f"Your trajectory diverges at call #{i + 1}. "
-                    f"You produced `{decoded_calls[i]}`, while the expected call is `{ground_truth_calls[i]}`. "
-                    f"Please revise this call and try again."
-                )
+        # 统一复用 FPLD 的标准化比较，避免因为参数顺序/字符串形态差异造成误判。
+        fpld = first_logic_divergence(decoded_calls, ground_truth_calls)
+        if fpld.divergence_index is not None and fpld.divergence_index >= 0:
+            return (
+                f"Your trajectory diverges at call #{fpld.divergence_index + 1}. "
+                f"{fpld.diagnosis} "
+                "Please revise this call and try again."
+            )
 
         if len(decoded_calls) > len(ground_truth_calls):
             return "You produced more calls than expected for this turn. Please keep only the required calls and retry."
