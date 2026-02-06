@@ -2,202 +2,166 @@
 
 > 说明：你在需求里写的是 **SSET**，结合上下文这里按论文中的 **SEET（Self-Play with Environment Tuning）** 实现。
 
-本文档聚焦两件事：
+本文档聚焦三件事：
 1. 这次代码到底新增/修改了什么；
-2. 这些改动如何一一对应到 SEET 四个核心机制，并保证代码可读性。
+2. 这些改动如何一一对应到 SEET 核心机制；
+3. Slow Loop 是否已经真正进入训练目标（端到端闭环）。
 
 ---
 
-## 1. 实现目标与达成情况
+## 1. 实现状态（最新）
 
-本次实现完成了以下核心复现目标：
+当前版本已经完成以下能力：
 
-- ✅ **环境即教学（Environment as Pedagogy）**：支持按 Stage 配置增强环境/标准环境行为。
+- ✅ **环境即教学（Environment as Pedagogy）**：按 Stage 选择增强环境/标准环境。
 - ✅ **双通道提示注入（Fast/Slow Loop）**：
-  - Fast Loop：在线错误重试 + 结构化提示；
-  - Slow Loop：失败轨迹与锚点轨迹自动生成反事实记录。
-- ✅ **FPLD（第一逻辑分歧点）**：能处理真实执行中的调用字符串格式（如 `foo(a=1)`）。
-- ✅ **动态锚点策略**：按 `Peer > Historical > Induced` 优先级选锚点。
-- ✅ **Stage2 真值拦截（Ground Truth Interception）**：偏离真值时先纠偏再执行。
+  - Fast Loop：在线错误重试 + FPLD 纠偏提示；
+  - Slow Loop：失败-锚点反事实样本持续沉淀。
+- ✅ **FPLD（第一逻辑分歧点）**：支持真实运行时字符串调用（如 `foo(a=1)`）与 dict 调用。
+- ✅ **动态锚点策略**：`Peer > Historical > Induced` 优先级框架。
+- ✅ **Stage2 真值拦截**：调用偏离即拦截并回注纠偏信息。
+- ✅ **Slow Loop 训练闭环**：`seet_counterfactual_records` 已进入 reward 计算并影响最终优化目标。
 
 ---
 
-## 2. 新增代码
+## 2. 新增模块（SEET 核心）
 
 ### 2.1 `env_tuning/seet/config.py`
 
-新增 `SeetConfig`：
-- `enabled`
-- `stage`
-- `retry_probability`
-- `max_retry_per_turn`
+`SeetConfig` 提供课程配置项：
 
-并暴露阶段属性：
+- 基础：`enabled`, `stage`, `retry_probability`, `max_retry_per_turn`
+- Stage3 退火：`stage3_retry_start`, `stage3_retry_end`
+- Stage2 开关：`enable_stage2_interception`
+
+并提供课程语义属性：
 - `use_augmented_env`
 - `allow_peer_anchor`
 - `allow_historical_anchor`
 - `allow_induced_anchor`
 
-用途：把训练课程（Stage1~4）映射为交互行为开关。
-
 ---
 
 ### 2.2 `env_tuning/seet/fpld.py`
 
-新增 FPLD 诊断实现，重点增强可用性：
+FPLD 逻辑诊断：
 
-- 支持两种输入：
-  1) 结构化 dict 调用；
-  2) 字符串调用（`tool(arg=...)`）。
-- 用 AST 将字符串调用解析为标准节点 `ToolNode(tool_name, arguments)`；
-- 返回 `FPLDResult(divergence_index, diagnosis)`，可直接用于 fast-loop 提示或 slow-loop 样本。
+- 支持 dict + 字符串调用两种输入格式；
+- 字符串调用通过 AST 归一化；
+- 输出 `FPLDResult(divergence_index, diagnosis)`。
 
 ---
 
 ### 2.3 `env_tuning/seet/anchor.py`
 
-新增锚点数据结构与选择器：
+锚点机制：
 
-- `AnchorTrace`：记录单轮成功轨迹；
-- `AnchorReplayBuffer`：历史成功轨迹池；
-- `DynamicAnchorSelector`：实现优先级：
-  - Stage3+：Peer（若有）
-  - Stage3/4：Historical
-  - Stage2：Induced
+- `AnchorTrace`：单轮锚点轨迹；
+- `AnchorReplayBuffer`：历史成功回放池；
+- `DynamicAnchorSelector`：动态优先级选锚点。
 
 ---
 
 ### 2.4 `env_tuning/seet/runtime.py`
 
-新增 `SeetRuntime`，封装：
+SEET 运行时编排：
 
-- `should_retry`：快通道重试概率控制；
-- `on_success`：成功轨迹写入锚点池；
-- `build_retry_hint`：结合锚点 + FPLD 生成在线提示；
-- `build_counterfactual_record`：构造慢通道反事实样本；
-- `stage2_ground_truth_interception`：Stage2 真值拦截逻辑。
+- `should_retry`：快通道重试（Stage3 支持线性退火）；
+- `build_retry_hint`：基于锚点 + FPLD 生成纠偏提示；
+- `build_counterfactual_record`：构建慢通道样本；
+- `stage2_ground_truth_interception`：Stage2 真值拦截。
 
 ---
 
-## 3. 修改代码
+## 3. 关键改动文件
 
 ### 3.1 `env_tuning/interaction/new_multi_turn_fc.py`
 
-这是本次最核心改动，主要包括：
+主交互流程已完成 SEET 接入：
 
-1. **SEET 初始化接入**
-   - 从 interaction config 读取 `seet` 参数；
-   - 启用后创建 `SeetRuntime`。
-
-2. **Stage2 真值拦截（新增）**
-   - 工具调用解码后先进行 GT 前缀一致性检查；
-   - 偏离则直接返回纠偏提示，不执行错误调用；
-   - 同时写入 `seet_counterfactual_records`。
-
-3. **快通道重试完善**
-   - 解析错误与执行错误都可触发 fast-loop；
-   - 返回 `channel=fast`、`reason=...` 便于训练侧统计。
-
-4. **慢通道样本落地**
-   - 在执行失败且存在可用锚点时，自动构建反事实样本并保存到 state。
-
-5. **可读性重构**
-   - 引入 `_maybe_stage2_intercept`、`_register_success_anchor_if_needed`、`_get_current_turn_ground_truth` 等私有函数，减少主流程复杂度。
+1. 初始化 `SeetRuntime`；
+2. 工具调用先解码，Stage2 先拦截后执行；
+3. 执行失败触发 Fast Loop 提示重试；
+4. 可用锚点时落地 Slow Loop 反事实样本；
+5. 执行成功写入锚点池。
 
 ---
 
 ### 3.2 `env_tuning/interaction/execution_manager.py`
 
-改动点：
-
-- `execute_function_calls` 新增 `predecoded_responses` 参数，支持“先解码后拦截再执行”的流程，避免重复解码。
-- `format_execution_response` 增加 `stage` / `augmented_env` 上下文提示。
-- 保留 `decode_tool_calls` 作为独立解码入口，便于交互层调用。
+- 增加 `predecoded_responses`，避免重复解码；
+- 保留 `decode_tool_calls` 作为独立入口；
+- 执行反馈中注入 stage / env mode 语义。
 
 ---
 
-### 3.3 `env_tuning/interaction/data_models.py`
+### 3.3 `env_tuning/interaction/data_models.py` + `turn_manager.py`
 
-`InstanceState` 已包含：
-- `seet_counterfactual_records: List[Dict[str, Any]]`
-
-用于慢通道样本缓存。
+- `InstanceState` 维护 `seet_counterfactual_records`；
+- turn 切换时通过 `extra` 导出并清空反事实记录（避免跨轮污染）。
 
 ---
 
-## 4. 配置与脚本
+### 3.4 `verl/verl/workers/rollout/sglang_rollout/sglang_rollout.py`
 
-### 4.1 新增 Stage 交互配置
+- 收集 interaction 返回的 `metrics`；
+- 聚合为 `reward_scores["interaction_turn_metrics"]`，把 SEET 慢通道信号送入奖励侧。
 
-新增：
+---
+
+### 3.5 `env_tuning/bfcl_reward.py`
+
+- 从 `interaction_turn_metrics` 提取 `seet_counterfactual_records` 数量；
+- 计算 `seet_slow_loop_bonus`（可配置系数与上限）；
+- 将 bonus 加入最终 `score`，直接作用于 reward tensor。
+
+---
+
+## 4. Stage 课程映射（Stage1~4）
+
+- **Stage1**：格式学习，高重试，增强环境。  
+- **Stage2**：真值拦截冷启动，沉淀课程诱导锚点。  
+- **Stage3**：标准环境，自博弈内化，重试概率线性退火（1.0→0.2）。  
+- **Stage4**：关闭重试，鲁棒性实战。  
+
+对应配置文件：
 - `env_tuning/config/multi_turn_fc_interaction_stage1.yaml`
 - `env_tuning/config/multi_turn_fc_interaction_stage2.yaml`
 - `env_tuning/config/multi_turn_fc_interaction_stage3.yaml`
 - `env_tuning/config/multi_turn_fc_interaction_stage4.yaml`
 
-内容包含 `stage/retry_probability/max_retry_per_turn`。
-
-### 4.2 修改 GRPO 配置绑定分阶段 interaction
-
-修改：
-- `multi_turn_fc_grpo_stage1.yaml`
-- `multi_turn_fc_grpo_stage2.yaml`
-- `multi_turn_fc_grpo_stage3.yaml`
-
-使其分别指向对应的 stage interaction config。
-
-### 4.3 新增 Stage4 配置与脚本
-
-新增：
-- `env_tuning/config/multi_turn_fc_grpo_stage4.yaml`
-- `scripts/run_multi_turn_fc_grpo_stage4.sh`
-
-用于关闭重试、模拟实战鲁棒性阶段。
-
 ---
 
-## 5. 复现映射（论文 -> 代码）
+## 5. Slow Loop 是否已经“真闭环”？
 
-- **Environment as Pedagogy**
-  - `SeetConfig.use_augmented_env`
-  - `format_execution_response(... stage, augmented_env)`
+是，当前已经闭环：
 
-- **Dual-Phase Hint Injection**
-  - Fast Loop：`build_retry_hint` + interaction 错误路径在线重试
-  - Slow Loop：`build_counterfactual_record` + `state.seet_counterfactual_records`
+1. interaction 生成 `seet_counterfactual_records`；
+2. turn manager 导出到每轮 `extra`；
+3. rollout 聚合为 `interaction_turn_metrics`；
+4. reward 函数提取记录数并计算 bonus；
+5. bonus 融入 `score`，参与 PPO/GRPO 优化。
 
-- **FPLD**
-  - `first_logic_divergence`（支持字符串调用 AST 解析）
-
-- **Dynamic Anchors**
-  - `DynamicAnchorSelector.choose`
-
-- **Stage2 GT Interception**
-  - `stage2_ground_truth_interception` + `_maybe_stage2_intercept`
+结论：Slow Loop 不再只是日志或附加信息，而是已成为训练目标的一部分。
 
 ---
 
 ## 6. 可读性设计说明
 
-本次代码可读性改进原则：
+本实现遵循以下可读性原则：
 
-1. **职责单一**：
-   - SEET 核心算法放 `env_tuning/seet/`；
-   - interaction 只做流程编排。
-2. **命名直观**：
-   - `build_retry_hint` / `stage2_ground_truth_interception` / `_register_success_anchor_if_needed` 等函数名即语义。
-3. **流程拆解**：
-   - `generate_response` 主路径变短，关键决策拆到私有函数。
-4. **最小侵入**：
-   - 保留现有执行/评分框架，SEET 以“可配置增强”方式接入。
+1. **职责分层**：SEET 算法在 `env_tuning/seet/`，交互层只负责编排。  
+2. **命名可读**：`build_retry_hint` / `stage2_ground_truth_interception` / `_register_success_anchor_if_needed` 等函数名即语义。  
+3. **流程拆解**：主流程短小，复杂逻辑封装到私有方法。  
+4. **配置优先**：课程行为尽可能由 yaml 控制，减少硬编码。  
 
 ---
 
-## 7. 你可以直接怎么用
+## 7. 你可以直接运行的路径
 
-- Stage1：格式学习 + 高重试。
-- Stage2：开启 GT 拦截，积累课程诱导锚点。
-- Stage3：标准环境 + 低概率重试，依赖历史锚点。
-- Stage4：重试关闭，验证实战鲁棒性。
+- Stage1：`scripts/run_multi_turn_fc_grpo_stage1.sh`
+- Stage2：`scripts/run_multi_turn_fc_grpo_stage2.sh`
+- Stage3：`scripts/run_multi_turn_fc_grpo_stage3.sh`
+- Stage4：`scripts/run_multi_turn_fc_grpo_stage4.sh`
 
-如果你愿意，我下一步可以继续把 `seet_counterfactual_records` 直接接入训练数据构造器（让 Slow Loop 真正参与 loss 计算），做到完整端到端闭环。
+如果你后续希望，我可以再补一版“训练日志解读指南”（如何从 reward 曲线中分离 `progress` 与 `seet_slow_loop_bonus` 的贡献），方便做 ablation 与论文复现实验。
