@@ -21,7 +21,11 @@ class SeetRuntime:
 
     def __init__(self, config: SeetConfig):
         self.config = config
-        self.replay_buffer = AnchorReplayBuffer()
+        # 中文注释：默认使用内存回放池；若配置了路径则在启动时尝试加载历史锚点。
+        if self.config.replay_buffer_path:
+            self.replay_buffer = AnchorReplayBuffer.load_from_file(self.config.replay_buffer_path)
+        else:
+            self.replay_buffer = AnchorReplayBuffer()
         self.selector = DynamicAnchorSelector(self.replay_buffer)
 
     def _effective_retry_probability(self, turn_index: int = 0, total_turns: int = 1) -> float:
@@ -51,6 +55,9 @@ class SeetRuntime:
                 anchor_type=anchor_type,
             )
         )
+
+        if self.config.persist_replay_buffer_on_update and self.config.replay_buffer_path:
+            self.replay_buffer.save_to_file(self.config.replay_buffer_path)
 
     # 中文注释：按 Stage 策略选择锚点轨迹，作为失败样本的纠偏参考。
     def choose_anchor_calls(
@@ -90,7 +97,7 @@ class SeetRuntime:
         if not fail_calls:
             return RetryDecision(
                 should_retry=True,
-                hint_text="[SEET] No valid tool call was produced in the previous step. Please retry with a valid function call that matches the task goal and argument constraints.",
+                hint_text="[SEET] I could not find a valid tool call in the previous step. Please retry with a function call that matches the task goal and argument constraints.",
                 anchor_calls=anchor_calls,
             )
 
@@ -118,17 +125,18 @@ class SeetRuntime:
         采用前缀一致性，允许模型逐步逼近。
         """
         if not decoded_calls:
-            return "[SEET-Stage2] No valid function call detected. Please issue the correct tool call first."
+            return "[SEET-Stage2] No valid function call was detected. Please start by issuing the expected tool call."
 
         compare_len = min(len(decoded_calls), len(ground_truth_calls))
         for i in range(compare_len):
             if decoded_calls[i] != ground_truth_calls[i]:
                 return (
-                    f"[SEET-Stage2 Interception] Deviation detected at call #{i + 1}. "
-                    f"Your call was `{decoded_calls[i]}`; expected `{ground_truth_calls[i]}`. Please retry."
+                    f"[SEET-Stage2 Interception] The trajectory diverges at call #{i + 1}. "
+                    f"You produced `{decoded_calls[i]}`, while the expected call is `{ground_truth_calls[i]}`. "
+                    f"Please adjust and try again."
                 )
 
         if len(decoded_calls) > len(ground_truth_calls):
-            return "[SEET-Stage2 Interception] The number of calls exceeds the target for this turn. Please reduce and retry."
+            return "[SEET-Stage2 Interception] You produced more calls than expected for this turn. Please keep only the required calls and retry."
 
         return None

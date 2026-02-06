@@ -31,8 +31,15 @@ SEET（Self-Play with Environment Tuning）用于多轮工具调用智能体训�
 
 ### 2.4 Stage2 真值拦截
 
-- 当模型调用与 ground truth 前缀不一致时，立即拦截并给出英文纠偏提示。
+- 当模型调用与 ground truth 前缀不一致时，立即拦截并给出更自然的英文纠偏提示。
 - 目标是降低冷启动阶段错误副作用，并更稳定地产生可学习的反事实样本。
+
+
+### 2.5 Replay Buffer 持久化（可选）
+
+- 默认行为：回放池仅在进程内保存，训练结束后释放。
+- 新增能力：可通过 `SeetConfig.replay_buffer_path` + `persist_replay_buffer_on_update` 开启文件级持久化。
+- 作用：在多次训练作业或中断恢复场景下复用历史锚点。
 
 ---
 

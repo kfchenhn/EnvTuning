@@ -86,18 +86,18 @@ def first_logic_divergence(fail_path: List[Any], anchor_path: List[Any]) -> FPLD
 
         if fail_node.tool_name != anchor_node.tool_name or fail_node.arguments != anchor_node.arguments:
             diagnosis = (
-                f"First logic divergence at step {idx + 1}: "
-                f"your call was {fail_node.tool_name}({fail_node.arguments}), "
-                f"while the anchor call was {anchor_node.tool_name}({anchor_node.arguments})."
+                f"The first logic mismatch appears at step {idx + 1}. "
+                f"You called {fail_node.tool_name}({fail_node.arguments}), "
+                f"but the anchor trajectory uses {anchor_node.tool_name}({anchor_node.arguments})."
             )
             return FPLDResult(divergence_index=idx, diagnosis=diagnosis)
 
     if len(fail_path) != len(anchor_path):
         idx = shortest
         diagnosis = (
-            f"Length divergence at step {idx + 1}: fail trace length={len(fail_path)}, "
-            f"anchor trace length={len(anchor_path)}."
+            f"The trajectories start to differ in length at step {idx + 1}: "
+            f"fail trace has {len(fail_path)} step(s), while the anchor trace has {len(anchor_path)} step(s)."
         )
         return FPLDResult(divergence_index=idx, diagnosis=diagnosis)
 
-    return FPLDResult(divergence_index=None, diagnosis="No logic divergence detected.")
+    return FPLDResult(divergence_index=None, diagnosis="No logic mismatch was detected between the two trajectories.")

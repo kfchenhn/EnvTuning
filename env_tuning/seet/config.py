@@ -19,6 +19,10 @@ class SeetConfig:
     # 课程机制开关
     enable_stage2_interception: bool = True
 
+    # 回放池持久化（可选）
+    replay_buffer_path: str = ""
+    persist_replay_buffer_on_update: bool = False
+
     @property
     def use_augmented_env(self) -> bool:
         return self.stage <= 2
