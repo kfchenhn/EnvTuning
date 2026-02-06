@@ -111,7 +111,7 @@ class MultiTurnFunctionCallInteraction(BaseInteraction):
         predecoded_calls: Optional[List[Any]] = None
         if response_data.response_type == ResponseType.TOOL_CALL:
             predecoded_calls = self.execution_manager.decode_tool_calls(response_data.content)
-            stage2_intercept = self._maybe_stage2_intercept(state, entry_id, predecoded_calls)
+            stage2_intercept = self._maybe_stage2_intercept(state, predecoded_calls)
             if stage2_intercept is not None:
                 return stage2_intercept
 
@@ -144,7 +144,11 @@ class MultiTurnFunctionCallInteraction(BaseInteraction):
                 score = 0.0
             return should_term, content, score, extra
 
-        if self.seet_runtime and self.seet_runtime.should_retry(state.current_turn_attempt_counts):
+        if self.seet_runtime and self.seet_runtime.should_retry(
+            state.current_turn_attempt_counts,
+            turn_index=state.current_turn_index,
+            total_turns=state.total_turns,
+        ):
             retry = self.seet_runtime.build_retry_hint(
                 stage=self.seet_config.stage,
                 entry_id=entry_id,
@@ -184,11 +188,10 @@ class MultiTurnFunctionCallInteraction(BaseInteraction):
     def _maybe_stage2_intercept(
         self,
         state: InstanceState,
-        entry_id: str,
         decoded_calls: List[Any],
     ) -> Optional[Tuple[bool, str, float, Dict[str, Any]]]:
         """Stage2 真值拦截：偏离即提示重试，不执行错误调用。"""
-        if not self.seet_runtime or self.seet_config.stage != 2:
+        if not self.seet_runtime or self.seet_config.stage != 2 or not self.seet_config.enable_stage2_interception:
             return None
 
         gt_calls = self._get_current_turn_ground_truth(state)
@@ -249,7 +252,11 @@ class MultiTurnFunctionCallInteraction(BaseInteraction):
 
         self._register_success_anchor_if_needed(state, entry_id, execution_result)
 
-        if self.seet_runtime and execution_result.has_error and self.seet_runtime.should_retry(state.current_turn_attempt_counts):
+        if self.seet_runtime and execution_result.has_error and self.seet_runtime.should_retry(
+            state.current_turn_attempt_counts,
+            turn_index=state.current_turn_index,
+            total_turns=state.total_turns,
+        ):
             retry = self.seet_runtime.build_retry_hint(
                 stage=self.seet_config.stage,
                 entry_id=entry_id,

@@ -22,11 +22,22 @@ class SeetRuntime:
         self.replay_buffer = AnchorReplayBuffer()
         self.selector = DynamicAnchorSelector(self.replay_buffer)
 
-    def should_retry(self, attempt_count: int) -> bool:
+    def _effective_retry_probability(self, turn_index: int = 0, total_turns: int = 1) -> float:
+        """计算当前轮次有效重试概率。Stage3 使用线性退火，其余阶段使用固定概率。"""
+        if self.config.stage != 3:
+            return self.config.retry_probability
+
+        if total_turns <= 1:
+            return self.config.stage3_retry_end
+
+        progress = min(max(turn_index / float(total_turns - 1), 0.0), 1.0)
+        return self.config.stage3_retry_start + progress * (self.config.stage3_retry_end - self.config.stage3_retry_start)
+
+    def should_retry(self, attempt_count: int, turn_index: int = 0, total_turns: int = 1) -> bool:
         """按概率和轮内次数判断是否允许重试。"""
         if attempt_count >= self.config.max_retry_per_turn:
             return False
-        return random.random() <= self.config.retry_probability
+        return random.random() <= self._effective_retry_probability(turn_index, total_turns)
 
     def on_success(self, entry_id: str, turn_index: int, decoded_calls: List[Any], anchor_type: str) -> None:
         """把成功轨迹注册为可复用锚点。"""
@@ -100,7 +111,7 @@ class SeetRuntime:
     def stage2_ground_truth_interception(self, decoded_calls: List[Any], ground_truth_calls: List[Any]) -> Optional[str]:
         """
         Stage2 真值拦截：若当前调用与真值不一致，返回纠偏提示。
-        这里采用“前缀一致性”策略，减少对多步输出的过严约束。
+        采用前缀一致性，允许模型逐步逼近。
         """
         if not decoded_calls:
             return "系统提示（SEET-Stage2）：当前没有有效函数调用，请先发起正确的工具调用。"

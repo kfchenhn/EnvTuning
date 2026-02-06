@@ -7,3 +7,5 @@ interaction:
         stage: 3
         retry_probability: 0.2
         max_retry_per_turn: 1
+        stage3_retry_start: 1.0
+        stage3_retry_end: 0.2

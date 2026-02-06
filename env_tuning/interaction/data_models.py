@@ -84,5 +84,11 @@ class InstanceState:
         self.all_turn_model_execution_results.extend(self.single_turn_model_execution_results)
         self.single_turn_model_execution_results.clear()
 
+    def pop_seet_counterfactual_records(self) -> List[Dict[str, Any]]:
+        """取出并清空当前累计的 SEET 反事实记录。"""
+        records = list(self.seet_counterfactual_records)
+        self.seet_counterfactual_records.clear()
+        return records
+
     def __repr__(self) -> str:
         return f"InstanceState({asdict(self)})"
